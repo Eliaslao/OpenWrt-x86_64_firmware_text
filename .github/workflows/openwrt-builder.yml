@@ -1,179 +1,46 @@
-name: OpenWrt AutoBuilder
+name: Build OpenWrt
 
 on:
-  repository_dispatch:
-  workflow_dispatch:
-    inputs:
-      clean_build:
-        description: 'Perform clean build'
-        required: false
-        default: 'false'
-
-env:
-  REPO_URL: https://github.com/coolsnowwolf/lede
-  REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: .config
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_RELEASE: false
-  TZ: Asia/Shanghai
+  push:
+    branches:
+      - lede
+  pull_request:
+    branches:
+      - lede
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Source
-      uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v3
       with:
-        submodules: recursive
+        ref: lede
 
-    - name: Setup Python2 Environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
+    - name: Set up environment
       run: |
-        # 添加旧版软件源
-        sudo add-apt-repository -y universe
-        sudo apt-get update -qq
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3
 
-        # 安装Python2核心组件
-        sudo apt-get install -y --no-install-recommends \
-          python2 \
-          python2-dev \
-          libpython2.7 \
-          libpython2.7-dev
-
-        # 手动配置Python环境
-        sudo update-alternatives --install /usr/bin/python python /usr/bin/python2 100
-        sudo ln -sf /usr/bin/python2 /usr/bin/python
-        sudo ln -sf /usr/bin/python2-config /usr/bin/python-config
-
-        # 安装旧版setuptools
-        curl -sL https://bootstrap.pypa.io/pip/2.7/get-pip.py | sudo python2
-        sudo pip2 install "setuptools<45"
-
-        # 验证安装
-        python --version | grep "Python 2.7"
-        [ -f /usr/lib/libpython2.7.so.1.0 ] || exit 1
-
-    - name: Install Build Dependencies
-      env:
-        DEBIAN_FRONTEND: noninteractive
+    - name: Copy custom .config and feeds.conf.default
       run: |
-        sudo rm -rf /etc/apt/sources.list.d/* \
-          /usr/share/dotnet \
-          /usr/local/lib/android \
-          /opt/ghc \
-          /opt/hostedtoolcache/CodeQL
+        cp .config openwrt/
+        cp feeds.conf.default openwrt/
 
-        sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends \
-          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext \
-          gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 \
-          libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev \
-          libmpfr-dev libncurses5-dev libncursesw5-dev libpython2-dev libpython3-dev \
-          libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip \
-          p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools \
-          qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl \
-          unzip vim wget xmlto xxd zlib1g-dev
-
-        sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown -R $USER:$(id -gn) /workdir
-
-    - name: Clone OpenWrt Source
-      working-directory: /workdir
+    - name: Update feeds
       run: |
-        git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
-        ln -sfn /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
-    - name: Validate Repository
-      working-directory: /workdir/openwrt
+    - name: Build OpenWrt
       run: |
-        [ -d .git ] || { echo "❌ Git repository missing"; exit 1; }
-        [ -f feeds.conf.default ] || { echo "❌ Default feeds missing"; exit 1; }
+        cd openwrt
+        make -j$(nproc) V=s
 
-    - name: Apply Custom Configuration
-      working-directory: $GITHUB_WORKSPACE
-      run: |
-        [ -f "${{ env.FEEDS_CONF }}" ] && cp -v "${{ env.FEEDS_CONF }}" openwrt/feeds.conf.default
-        [ -f "${{ env.DIY_P1_SH }}" ] && { chmod +x "${{ env.DIY_P1_SH }}"; (cd openwrt && ../"${{ env.DIY_P1_SH }}"); }
-
-    - name: Update Feeds
-      working-directory: $GITHUB_WORKSPACE/openwrt
-      run: ./scripts/feeds update -a
-
-    - name: Install Feeds
-      working-directory: $GITHUB_WORKSPACE/openwrt
-      run: ./scripts/feeds install -a
-
-    - name: Load Device Config
-      working-directory: $GITHUB_WORKSPACE
-      run: |
-        [ -d files ] && cp -rv files openwrt/files/
-        [ -f "${{ env.CONFIG_FILE }}" ] && cp -v "${{ env.CONFIG_FILE }}" openwrt/.config
-        [ -f "${{ env.DIY_P2_SH }}" ] && { chmod +x "${{ env.DIY_P2_SH }}"; (cd openwrt && ../"${{ env.DIY_P2_SH }}"); }
-
-    - name: Verify Build Configuration
-      working-directory: $GITHUB_WORKSPACE/openwrt
-      run: |
-        [ -f .config ] || { echo "❌ Missing .config"; exit 1; }
-        grep -q 'CONFIG_TARGET.*=y' .config || { echo "❌ Invalid target config"; exit 1; }
-
-    - name: Download Packages
-      working-directory: $GITHUB_WORKSPACE/openwrt
-      run: |
-        make defconfig
-        for i in {1..3}; do
-          make download -j$(($(nproc) + 1)) && break
-          sleep $((i * 10))
-        done
-        find dl -size -1024c -delete
-
-    - name: Pre-Compile Check
-      run: |
-        echo "=== 存储空间状态 ==="
-        df -h
-        echo "=== 工作目录大小 ==="
-        du -sh $GITHUB_WORKSPACE
-
-    - name: Compile Firmware
-      working-directory: $GITHUB_WORKSPACE/openwrt
-      timeout-minutes: 120
-      run: |
-        echo "使用 $(nproc) 线程进行编译"
-        make -j$(nproc) V=s || {
-          echo "⚠️ 并行编译失败，尝试单线程编译..."
-          make -j1 V=s
-        }
-
-        DEVICE_NAME=$(grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/')
-        echo "DEVICE_NAME=_${DEVICE_NAME}" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: Prepare Artifacts
-      if: success() && !cancelled()
-      run: |
-        cd $GITHUB_WORKSPACE/openwrt/bin/targets
-        TARGET_DIR=$(find . -mindepth 2 -maxdepth 2 -type d | head -1)
-        rm -rf ${TARGET_DIR}/packages
-        echo "FIRMWARE_PATH=${PWD}/${TARGET_DIR}" >> $GITHUB_ENV
-
-    - name: Upload Firmware
-      if: env.UPLOAD_FIRMWARE == 'true'
-      uses: actions/upload-artifact@v4
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
       with:
-        name: OpenWrt-Firmware-${{ env.DEVICE_NAME }}-${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE_PATH }}
-        retention-days: 7
-
-    - name: Post-Build Cleanup
-      if: always()
-      run: |
-        sudo rm -rf /workdir/openwrt
-        df -h
+        name: openwrt-binaries
+        path: openwrt/bin/
