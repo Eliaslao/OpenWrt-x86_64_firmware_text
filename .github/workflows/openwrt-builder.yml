@@ -22,17 +22,28 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v3  # 使用稳定版本v3替代main分支
+      uses: actions/checkout@v4
+
+    # 初始化环境后添加系统工具验证
+    - name: Verify system tools
+      run: |
+        echo "=== 关键工具版本检查 ==="
+        git --version || { echo "Git未安装"; exit 1; }
+        gcc --version || { echo "GCC未安装"; exit 1; }
+        make --version || { echo "Make未安装"; exit 1; }
+        python2 --version || { echo "Python2未安装"; exit 1; }
+        python3 --version || { echo "Python3未安装"; exit 1; }
+        echo "=== 基础依赖验证通过 ==="
 
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force || true  # 添加错误抑制
+        sudo docker image prune --all --force || true
         sudo -E apt-get -qq update
-        # 添加python2依赖
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython2-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq install --no-install-recommends \
+          ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython2-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
@@ -43,16 +54,29 @@ jobs:
       working-directory: /workdir
       run: |
         df -hT $PWD
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt  # 浅克隆加速
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-    - name: Load custom feeds
-      working-directory: $GITHUB_WORKSPACE  # 明确指定工作目录
+    # 添加源码仓库状态检查
+    - name: Check repository health
+      working-directory: /workdir/openwrt
       run: |
-        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
+        echo "=== 仓库状态检查 ==="
+        git log -1 --oneline || { echo "仓库克隆异常"; exit 1; }
+        [ -d ./scripts ] || { echo "源码目录结构不完整"; exit 1; }
+        echo "=== 仓库验证通过 ==="
+
+    - name: Load custom feeds
+      working-directory: $GITHUB_WORKSPACE
+      run: |
+        # 配置文件存在性检查
+        [ -f $FEEDS_CONF ] || { echo "缺失feeds配置文件"; exit 1; }
+        [ -f $DIY_P1_SH ] || { echo "缺失DIY脚本part1"; exit 1; }
+        
+        cp $FEEDS_CONF openwrt/feeds.conf.default
         chmod +x $DIY_P1_SH
         cd openwrt
-        ../$DIY_P1_SH  # 使用相对路径更安全
+        ../$DIY_P1_SH
 
     - name: Update feeds
       working-directory: $GITHUB_WORKSPACE/openwrt
@@ -62,14 +86,34 @@ jobs:
       working-directory: $GITHUB_WORKSPACE/openwrt
       run: ./scripts/feeds install -a
 
+    # 添加feeds安装验证
+    - name: Verify feeds installation
+      working-directory: $GITHUB_WORKSPACE/openwrt
+      run: |
+        [ -d ./package ] || { echo "Feeds安装失败"; exit 1; }
+        [ -f ./feeds.conf.default ] || { echo "Feeds配置丢失"; exit 1; }
+        echo "=== Feeds验证通过 ==="
+
     - name: Load custom configuration
       working-directory: $GITHUB_WORKSPACE
       run: |
-        [ -e files ] && cp -r files openwrt/files
-        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
+        # 配置文件存在性检查
+        [ -f $CONFIG_FILE ] || { echo "缺失.config文件"; exit 1; }
+        [ -f $DIY_P2_SH ] || { echo "缺失DIY脚本part2"; exit 1; }
+        
+        [ -d files ] && cp -r files openwrt/files
+        cp $CONFIG_FILE openwrt/.config
         chmod +x $DIY_P2_SH
         cd openwrt
-        ../$DIY_P2_SH  # 使用相对路径
+        ../$DIY_P2_SH
+
+    # 添加.config文件验证
+    - name: Verify .config
+      working-directory: $GITHUB_WORKSPACE/openwrt
+      run: |
+        [ -f .config ] || { echo ".config文件未生成"; exit 1; }
+        grep 'CONFIG_TARGET.*=y' .config || { echo "配置未指定目标设备"; exit 1; }
+        echo "=== 配置文件验证通过 ==="
 
     - name: Download package
       id: package
@@ -80,78 +124,14 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
+    # 添加存储空间检查
+    - name: Pre-compile space check
+      run: |
+        echo "=== 编译前存储空间检查 ==="
+        df -h
+        du -sh $GITHUB_WORKSPACE
+        echo "========================="
+
     - name: Compile the firmware
       id: compile
-      working-directory: $GITHUB_WORKSPACE/openwrt
-      run: |
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@v3
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: openwrt/bin
-
-    - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      working-directory: $GITHUB_WORKSPACE/openwrt/bin/targets
-      run: |
-        cd */  # 适配不同平台路径
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@v3
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE }}
-
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        # 修正条件判断语法
-        if [ "${UPLOAD_GOFILE}" = "true" ] && [ -n "${{ steps.gofile.outputs.url }}" ]; then
-          echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
-        fi
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to release
-      uses: softprops/action-gh-release@v1
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        files: ${{ env.FIRMWARE }}/*
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 0
-        keep_minimum_runs: 2
-
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@v0.2.1
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 3
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      working-directory: $GITHUB_WORK
