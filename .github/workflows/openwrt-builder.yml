@@ -1,12 +1,7 @@
 name: Build OpenWrt
 
 on:
-  push:
-    branches:
-      - lede
-  pull_request:
-    branches:
-      - lede
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
@@ -16,7 +11,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v3
       with:
-        ref: lede
+        ref: lede  # 使用 lede 分支
 
     - name: Set up environment
       run: |
